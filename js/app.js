@@ -2,7 +2,8 @@ const App = {
   data: null,
   currentAbortController: null,
   isGenerating: false,
-  tempMessageIndices: { user: -1, ai: -1 },
+  currentTempDiv: null,
+  activeGenerationId: 0,
 
   init() {
     this.data = Storage.load();
@@ -53,9 +54,9 @@ const App = {
 
     document.getElementById('clearChatBtn').addEventListener('click', () => {
       if (!this.data.activeChatId) return;
+      if (this.isGenerating) { UI.showToast('正在生成，请稍候', 'error'); return; }
       if (confirm('确定清空当前会话的所有消息？')) {
         Storage.clearChat(this.data, this.data.activeChatId);
-        const chat = Storage.getChat(this.data, this.data.activeChatId);
         this.renderChat();
         this.renderChatList();
       }
@@ -113,8 +114,8 @@ const App = {
 
   renderChat() {
     const chat = this.data.activeChatId ? Storage.getChat(this.data, this.data.activeChatId) : null;
-    UI.renderMessages(chat, 
-      (idx) => this.openEdit(idx), 
+    UI.renderMessages(chat,
+      (idx) => this.openEdit(idx),
       (idx) => this.deleteMessage(idx)
     );
     UI.updateChatTitle(chat ? chat.title : '新会话');
@@ -125,6 +126,7 @@ const App = {
   },
 
   createNewChat() {
+    if (this.isGenerating) { UI.showToast('正在生成，请稍候', 'error'); return; }
     const chat = Storage.newChat('新会话');
     this.data.chats.unshift(chat);
     this.data.activeChatId = chat.id;
@@ -136,6 +138,10 @@ const App = {
   },
 
   selectChat(id) {
+    if (this.isGenerating) {
+      if (!confirm('正在生成回复，确定切换会话？当前生成将被取消。')) return;
+      this.stopGeneration();
+    }
     this.data.activeChatId = id;
     Storage.save(this.data);
     this.renderChatList();
@@ -144,9 +150,19 @@ const App = {
   },
 
   deleteChat(id) {
-    Storage.deleteChat(this.data, id);
-    this.renderChatList();
-    this.renderChat();
+    if (this.isGenerating) { UI.showToast('正在生成，请稍候', 'error'); return; }
+    if (this.data.activeChatId === id && confirm('确定删除当前会话？')) {
+      Storage.deleteChat(this.data, id);
+      this.data.activeChatId = this.data.chats[0]?.id || null;
+      Storage.save(this.data);
+      this.renderChatList();
+      this.renderChat();
+    } else if (confirm('确定删除此会话？')) {
+      Storage.deleteChat(this.data, id);
+      Storage.save(this.data);
+      this.renderChatList();
+      if (this.data.activeChatId === id) this.renderChat();
+    }
   },
 
   renameChat(id) {
@@ -170,31 +186,38 @@ const App = {
     if (!content) return;
 
     if (!this.data.activeChatId) {
-      this.createNewChat();
+      const chat = Storage.newChat('新会话');
+      this.data.chats.unshift(chat);
+      this.data.activeChatId = chat.id;
+      Storage.save(this.data);
+      this.renderChatList();
+      this.renderChat();
     }
 
     this.isGenerating = true;
     this.updateSendButton();
 
     const chat = Storage.getChat(this.data, this.data.activeChatId);
-    if (!chat) return;
+    if (!chat) { this.isGenerating = false; this.updateSendButton(); return; }
 
     if (chat.title === '新会话') {
       const title = content.length > 20 ? content.slice(0, 20) + '...' : content;
       Storage.updateChatTitle(this.data, chat.id, title);
       UI.updateChatTitle(title);
+      this.renderChatList();
     }
 
     Storage.addMessage(this.data, chat.id, 'user', content);
     input.value = '';
     UI.autoResizeTextarea(input);
-    this.renderChatList();
-    this.renderChat();
+
+    UI.appendUserMessage(content);
 
     this.generateReply();
   },
 
   async generateReply() {
+    const genId = ++this.activeGenerationId;
     const chat = Storage.getChat(this.data, this.data.activeChatId);
     if (!chat) { this.isGenerating = false; this.updateSendButton(); return; }
 
@@ -211,14 +234,26 @@ const App = {
     const messages = chat.messages.map(m => ({ role: m.role, content: m.content }));
 
     const aiTempDiv = UI.appendAIMessage();
+    this.currentTempDiv = aiTempDiv;
     this.currentAbortController = new AbortController();
 
     try {
       const fullContent = await Api.sendMessages(
         messages, model, this.data.settings,
-        (chunk, accumulated) => UI.updateAIMessage(aiTempDiv, accumulated),
+        (chunk, accumulated) => {
+          if (this.activeGenerationId !== genId) return;
+          UI.updateAIMessage(aiTempDiv, accumulated);
+        },
         this.currentAbortController.signal
       );
+
+      if (this.activeGenerationId !== genId) return;
+
+      if (!fullContent || !fullContent.trim()) {
+        aiTempDiv.querySelector('.message-text').innerHTML =
+          '<span style="color:#e74c3c">❌ AI 没有返回任何内容，请重试或更换模型。</span>';
+        return;
+      }
 
       Storage.addMessage(this.data, chat.id, 'assistant', fullContent);
       const finalIdx = chat.messages.length - 1;
@@ -226,42 +261,68 @@ const App = {
         (idx) => this.openEdit(idx),
         (idx) => this.deleteMessage(idx)
       );
+      this.currentTempDiv = null;
 
     } catch (e) {
+      if (this.activeGenerationId !== genId) return;
+
       if (e.name === 'AbortError') {
-        const partial = aiTempDiv.querySelector('.message-text').innerText;
+        const partial = aiTempDiv.querySelector('.message-text')?.innerText || '';
         if (partial.trim()) {
-          Storage.addMessage(this.data, chat.id, 'assistant', partial);
+          Storage.addMessage(this.data, chat.id, 'assistant', partial.trim());
+          const finalIdx = chat.messages.length - 1;
+          UI.finishAIMessage(aiTempDiv, finalIdx,
+            (idx) => this.openEdit(idx),
+            (idx) => this.deleteMessage(idx)
+          );
         } else {
           aiTempDiv.remove();
         }
+        this.currentTempDiv = null;
       } else {
         UI.showToast(e.message || '生成失败', 'error');
-        aiTempDiv.querySelector('.message-text').innerHTML = 
-          `<span style="color:#e74c3c">❌ 出错：${UI.escapeHtml(e.message)}</span>`;
+        const textEl = aiTempDiv.querySelector('.message-text');
+        if (textEl) {
+          textEl.innerHTML = `<span style="color:#e74c3c">❌ 出错：${UI.escapeHtml(e.message || '未知错误')}</span>`;
+        }
+        this.currentTempDiv = null;
       }
     } finally {
-      this.isGenerating = false;
-      this.currentAbortController = null;
-      this.updateSendButton();
+      if (this.activeGenerationId === genId) {
+        this.isGenerating = false;
+        this.currentAbortController = null;
+        this.updateSendButton();
+      }
     }
   },
 
   stopGeneration() {
+    this.activeGenerationId++;
     if (this.currentAbortController) {
       this.currentAbortController.abort();
+      this.currentAbortController = null;
     }
+    this.isGenerating = false;
+    this.updateSendButton();
   },
 
   updateSendButton() {
     const sendBtn = document.getElementById('sendBtn');
     const stopBtn = document.getElementById('stopBtn');
-    sendBtn.style.display = this.isGenerating ? 'none' : 'flex';
-    stopBtn.style.display = this.isGenerating ? 'flex' : 'none';
-    sendBtn.disabled = this.isGenerating;
+    if (this.isGenerating) {
+      sendBtn.style.display = 'none';
+      stopBtn.style.display = 'flex';
+      sendBtn.disabled = true;
+    } else {
+      sendBtn.style.display = 'flex';
+      stopBtn.style.display = 'none';
+      sendBtn.disabled = false;
+    }
   },
 
   deleteMessage(index) {
+    if (this.isGenerating) { UI.showToast('正在生成，请稍候', 'error'); return; }
+
     const chat = Storage.getChat(this.data, this.data.activeChatId);
     if (!chat) return;
 
@@ -274,6 +335,7 @@ const App = {
       if (lookIdx >= 0 && chat.messages[lookIdx]?.role === 'user') {
         Storage.deleteMessage(this.data, chat.id, lookIdx);
         index--;
+        deleteCount = 2;
       }
     }
 
@@ -284,6 +346,8 @@ const App = {
   },
 
   openEdit(index) {
+    if (this.isGenerating) { UI.showToast('正在生成，请稍候', 'error'); return; }
+
     const chat = Storage.getChat(this.data, this.data.activeChatId);
     if (!chat || !chat.messages[index]) return;
 
@@ -313,6 +377,8 @@ const App = {
   },
 
   async saveEdit() {
+    if (this.isGenerating) { UI.showToast('正在生成，请稍候', 'error'); return; }
+
     const chat = Storage.getChat(this.data, this.data.activeChatId);
     if (!chat || this.editingIndex === null) return;
 
@@ -336,9 +402,10 @@ const App = {
 
     this.closeEdit();
     this.renderChat();
+    this.renderChatList();
 
     if (editingRole === 'user') {
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 50));
       this.generateReply();
     }
   },

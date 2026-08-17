@@ -1,4 +1,6 @@
 const UI = {
+  welcomeEl: null,
+
   showToast(message, type = '') {
     const toast = document.createElement('div');
     toast.className = 'toast ' + type;
@@ -9,18 +11,12 @@ const UI = {
 
   renderChatList(data, onSelect, onDelete, onRename, searchQuery = '') {
     const list = document.getElementById('chatList');
-    const query = searchQuery.toLowerCase().trim();
+    const query = (searchQuery || '').toLowerCase().trim();
 
     let chats = [...data.chats].sort((a, b) => b.createdAt - a.createdAt);
+    if (query) chats = chats.filter(c => c.title.toLowerCase().includes(query));
 
-    if (query) {
-      chats = chats.filter(c => c.title.toLowerCase().includes(query));
-    }
-
-    if (chats.length === 0) {
-      list.innerHTML = '';
-      return;
-    }
+    if (chats.length === 0) { list.innerHTML = ''; return; }
 
     list.innerHTML = chats.map(chat => {
       const active = chat.id === data.activeChatId ? 'active' : '';
@@ -50,9 +46,7 @@ const UI = {
     list.querySelectorAll('.delete-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (confirm('确定删除此会话？')) {
-          onDelete(btn.dataset.id);
-        }
+        if (confirm('确定删除此会话？')) onDelete(btn.dataset.id);
       });
     });
 
@@ -67,14 +61,16 @@ const UI = {
   renderMessages(chat, onEdit, onDelete) {
     const container = document.getElementById('messages');
     const welcome = document.getElementById('welcomeScreen');
+    this.welcomeEl = welcome;
 
     if (!chat || chat.messages.length === 0) {
       container.innerHTML = '';
+      welcome.style.display = '';
       container.appendChild(welcome);
       return;
     }
 
-    welcome.remove();
+    welcome.style.display = 'none';
 
     container.innerHTML = chat.messages.map((msg, idx) => this.messageHTML(msg, idx)).join('');
 
@@ -96,7 +92,7 @@ const UI = {
   messageHTML(msg, idx) {
     const isUser = msg.role === 'user';
     const avatar = isUser ? 'Z' : 'AI';
-    const renderedContent = isUser 
+    const content = isUser
       ? this.escapeHtml(msg.content).replace(/\n/g, '<br>')
       : Markdown.render(msg.content);
 
@@ -104,7 +100,7 @@ const UI = {
       <div class="message ${isUser ? 'user' : 'ai'}" data-idx="${idx}">
         <div class="message-avatar">${avatar}</div>
         <div class="message-content">
-          <div class="message-text">${renderedContent}</div>
+          <div class="message-text">${content}</div>
           <div class="message-actions">
             <button class="message-action-btn message-edit-btn" data-index="${idx}" title="编辑">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
@@ -113,7 +109,7 @@ const UI = {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
             </button>
             ${!isUser ? `
-              <button class="message-action-btn" title="复制" onclick="navigator.clipboard.writeText(document.querySelector('[data-idx=&quot;${idx}&quot;] .message-text').innerText)">
+              <button class="message-action-btn message-copy-btn" title="复制">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
             ` : ''}
@@ -123,14 +119,17 @@ const UI = {
     `;
   },
 
-  appendUserMessage(content) {
-    const container = document.getElementById('messages');
+  hideWelcome() {
     const welcome = document.getElementById('welcomeScreen');
-    if (welcome) welcome.remove();
+    if (welcome) welcome.style.display = 'none';
+  },
+
+  appendUserMessage(content) {
+    this.hideWelcome();
+    const container = document.getElementById('messages');
 
     const div = document.createElement('div');
     div.className = 'message user';
-    div.dataset.temp = 'user';
     div.innerHTML = `
       <div class="message-avatar">Z</div>
       <div class="message-content">
@@ -143,13 +142,11 @@ const UI = {
   },
 
   appendAIMessage() {
+    this.hideWelcome();
     const container = document.getElementById('messages');
-    const welcome = document.getElementById('welcomeScreen');
-    if (welcome) welcome.remove();
 
     const div = document.createElement('div');
     div.className = 'message ai';
-    div.dataset.temp = 'ai';
     div.innerHTML = `
       <div class="message-avatar">AI</div>
       <div class="message-content">
@@ -169,28 +166,40 @@ const UI = {
   },
 
   finishAIMessage(tempDiv, finalIndex, onEdit, onDelete) {
-    const textEl = tempDiv.querySelector('.message-content');
-    textEl.innerHTML = `
-      <div class="message-text">${tempDiv.querySelector('.message-text').innerHTML}</div>
-      <div class="message-actions">
-        <button class="message-action-btn message-edit-btn" data-index="${finalIndex}" title="编辑">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-        </button>
-        <button class="message-action-btn message-delete-btn" data-index="${finalIndex}" title="删除">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-        </button>
-        <button class="message-action-btn" title="复制" onclick="navigator.clipboard.writeText(this.closest('.message-content').querySelector('.message-text').innerText)">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-        </button>
-      </div>
+    const textEl = tempDiv.querySelector('.message-text');
+    const renderedHTML = textEl.innerHTML;
+    const contentDiv = tempDiv.querySelector('.message-content');
+    contentDiv.innerHTML = '';
+
+    const textWrap = document.createElement('div');
+    textWrap.className = 'message-text';
+    textWrap.innerHTML = renderedHTML;
+
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'message-actions';
+    actionsDiv.innerHTML = `
+      <button class="message-action-btn message-edit-btn" title="编辑">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+      </button>
+      <button class="message-action-btn message-delete-btn" title="删除">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+      <button class="message-action-btn message-copy-btn" title="复制">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      </button>
     `;
 
-    textEl.querySelector('.message-edit-btn').addEventListener('click', () => onEdit(finalIndex));
-    textEl.querySelector('.message-delete-btn').addEventListener('click', () => {
-      if (confirm('确定删除此消息？删除后 AI 的回复也会被移除。')) {
-        onDelete(finalIndex);
-      }
+    actionsDiv.querySelector('.message-edit-btn').addEventListener('click', () => onEdit(finalIndex));
+    actionsDiv.querySelector('.message-delete-btn').addEventListener('click', () => {
+      if (confirm('确定删除此消息？删除后 AI 的回复也会被移除。')) onDelete(finalIndex);
     });
+    actionsDiv.querySelector('.message-copy-btn').addEventListener('click', () => {
+      const text = textWrap.innerText;
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => UI.showToast('已复制', 'success'));
+    });
+
+    contentDiv.appendChild(textWrap);
+    contentDiv.appendChild(actionsDiv);
 
     tempDiv.removeAttribute('data-temp');
     tempDiv.dataset.idx = finalIndex;

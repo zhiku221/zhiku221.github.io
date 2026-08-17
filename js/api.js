@@ -15,15 +15,31 @@ const Api = {
       temperature: settings.temperature ?? 1
     };
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
-      body: JSON.stringify(body),
-      signal
-    });
+    const timeoutId = setTimeout(() => {
+      try { signal?.dispatchEvent(new Event('abort')); } catch {}
+    }, 120000);
+
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body),
+        signal
+      });
+    } catch (e) {
+      clearTimeout(timeoutId);
+      if (e.name === 'AbortError') throw e;
+      if (e.name === 'TypeError' && e.message.includes('Failed to fetch')) {
+        throw new Error('网络错误：无法连接到 API 服务器（可能是 CORS 或网络问题）');
+      }
+      throw new Error('请求失败：' + e.message);
+    }
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
@@ -36,9 +52,7 @@ const Api = {
       throw new Error(msg);
     }
 
-    if (!response.body) {
-      throw new Error('响应体为空');
-    }
+    if (!response.body) throw new Error('响应体为空');
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -46,7 +60,14 @@ const Api = {
     let fullContent = '';
 
     while (true) {
-      const { done, value } = await reader.read();
+      let readResult;
+      try {
+        readResult = await reader.read();
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        throw new Error('读取流失败：' + e.message);
+      }
+      const { done, value } = readResult;
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -68,9 +89,7 @@ const Api = {
               fullContent += delta.content;
               onChunk(delta.content, fullContent);
             }
-          } catch (e) {
-            // skip malformed lines
-          }
+          } catch { /* skip */ }
         }
       }
     }
@@ -94,9 +113,7 @@ const Api = {
       const response = await fetch(baseUrl.replace(/\/+$/, '') + '/models', {
         headers: { 'Authorization': `Bearer ${apiKey}` }
       });
-      if (response.ok) {
-        return { ok: true };
-      }
+      if (response.ok) return { ok: true };
       const errText = await response.text().catch(() => '');
       return { ok: false, error: `HTTP ${response.status}` };
     } catch (e) {
